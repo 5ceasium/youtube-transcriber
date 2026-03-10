@@ -6,6 +6,7 @@ Downloads YouTube audio via yt-dlp and transcribes it using faster-whisper.
 
 import sys
 import os
+import json
 import argparse
 import tempfile
 
@@ -13,10 +14,10 @@ import yt_dlp
 from faster_whisper import WhisperModel
 
 
-def download_audio(url: str, output_dir: str) -> tuple[str, str]:
+def download_audio(url: str, output_dir: str) -> tuple[str, str, dict]:
     """Download audio-only from a YouTube URL using yt-dlp.
 
-    Returns (video_title, path_to_wav_file).
+    Returns (video_title, path_to_wav_file, info_dict).
     """
     ydl_opts = {
         "format": "bestaudio/best",
@@ -37,7 +38,31 @@ def download_audio(url: str, output_dir: str) -> tuple[str, str]:
         video_id = info["id"]
         title = info.get("title", video_id)
         audio_path = os.path.join(output_dir, f"{video_id}.wav")
-        return title, audio_path
+        return title, audio_path, info
+
+
+def get_channel_stats(channel_url: str) -> dict:
+    """Fetch channel subscriber count, description, and average views over recent videos."""
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "playlistend": 30,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(channel_url + "/videos", download=False)
+
+    subscribers = info.get("channel_follower_count")
+    channel_description = info.get("description", "")
+    entries = info.get("entries") or []
+    view_counts = [e["view_count"] for e in entries if e.get("view_count")]
+    average_views = round(sum(view_counts) / len(view_counts)) if view_counts else None
+
+    return {
+        "subscribers": subscribers,
+        "channel_description": channel_description,
+        "average_views": average_views,
+    }
 
 
 def transcribe(audio_path: str, model: WhisperModel) -> str:
@@ -71,11 +96,22 @@ def process_urls(urls: list[str], output_dir: str, model_size: str) -> None:
 
             try:
                 print("  Downloading audio...")
-                title, audio_path = download_audio(url, tmp_dir)
+                title, audio_path, info = download_audio(url, tmp_dir)
                 print(f"  Title: {title}")
+
+                print("  Fetching channel stats...")
+                channel_url = info.get("channel_url", "")
+                channel_stats = get_channel_stats(channel_url) if channel_url else {}
 
                 print("  Transcribing...")
                 transcript = transcribe(audio_path, model)
+
+                stats_array = [
+                    {"video_description": info.get("description", "")},
+                    {"channel_description": channel_stats.get("channel_description", "")},
+                    {"subscribers": channel_stats.get("subscribers")},
+                    {"average_views": channel_stats.get("average_views")},
+                ]
 
                 # Write transcript file
                 out_name = sanitize_filename(title) + ".txt"
@@ -84,6 +120,9 @@ def process_urls(urls: list[str], output_dir: str, model_size: str) -> None:
                     f.write(f"Title: {title}\n")
                     f.write(f"URL:   {url}\n")
                     f.write("-" * 60 + "\n\n")
+                    f.write("STATS:\n")
+                    f.write(json.dumps(stats_array, indent=2, ensure_ascii=False))
+                    f.write("\n\n" + "-" * 60 + "\n\n")
                     f.write(transcript + "\n")
 
                 print(f"  Saved: {out_path}")
