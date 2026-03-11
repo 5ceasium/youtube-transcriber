@@ -14,7 +14,7 @@ import yt_dlp
 from faster_whisper import WhisperModel
 
 
-def download_audio(url: str, output_dir: str) -> tuple[str, str, dict]:
+def download_audio(url: str, output_dir: str, cookies_file: str | None = None) -> tuple[str, str, dict]:
     """Download audio-only from a YouTube URL using yt-dlp.
 
     Returns (video_title, path_to_wav_file, info_dict).
@@ -31,7 +31,12 @@ def download_audio(url: str, output_dir: str) -> tuple[str, str, dict]:
         ],
         "quiet": True,
         "no_warnings": True,
+        # Try multiple player clients to bypass bot detection on cloud environments
+        "extractor_args": {"youtube": {"player_client": ["ios", "android", "web"]}},
     }
+
+    if cookies_file:
+        ydl_opts["cookiefile"] = cookies_file
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)

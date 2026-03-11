@@ -5,6 +5,8 @@ FastAPI wrapper for the YouTube transcriber scraper.
 
 import tempfile
 import asyncio
+import base64
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, HTTPException
@@ -26,6 +28,7 @@ async def startup():
 
 class TranscribeRequest(BaseModel):
     url: str
+    cookies: str | None = None  # Base64-encoded Netscape-format cookie file contents
 
 
 @app.get("/")
@@ -37,15 +40,21 @@ async def health():
 async def transcribe_video(req: TranscribeRequest):
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(executor, _process, req.url)
+        result = await loop.run_in_executor(executor, _process, req.url, req.cookies)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     return result
 
 
-def _process(url: str) -> dict:
+def _process(url: str, cookies_b64: str | None = None) -> dict:
     with tempfile.TemporaryDirectory() as tmp_dir:
-        title, audio_path, info = download_audio(url, tmp_dir)
+        cookies_file = None
+        if cookies_b64:
+            cookies_file = os.path.join(tmp_dir, "cookies.txt")
+            with open(cookies_file, "w") as f:
+                f.write(base64.b64decode(cookies_b64).decode("utf-8"))
+
+        title, audio_path, info = download_audio(url, tmp_dir, cookies_file)
 
         channel_url = info.get("channel_url", "")
         channel_stats = get_channel_stats(channel_url) if channel_url else {}
