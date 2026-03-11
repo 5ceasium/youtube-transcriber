@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 YouTube AI Caption Scraper
-Downloads YouTube audio via yt-dlp and transcribes it using faster-whisper.
+Downloads YouTube audio via yt-dlp (with browser-impersonated cookies) and
+transcribes it using faster-whisper. No login required.
 """
 
 import sys
@@ -10,18 +11,33 @@ import json
 import argparse
 import tempfile
 
+import curl_cffi.requests as curl_requests
 import yt_dlp
 from faster_whisper import WhisperModel
 
 
-def download_audio(url: str, output_dir: str, cookies_file: str | None = None) -> tuple[str, str, dict]:
+def generate_youtube_cookies(cookie_file_path: str) -> None:
+    """Visit YouTube with Chrome impersonation to obtain anonymous session cookies."""
+    session = curl_requests.Session(impersonate="chrome120")
+    session.get("https://www.youtube.com/")
+    with open(cookie_file_path, "w") as f:
+        f.write("# Netscape HTTP Cookie File\n")
+        for cookie in session.cookies.jar:
+            domain = cookie.domain or ".youtube.com"
+            if "youtube" not in domain:
+                continue
+            secure = "TRUE" if cookie.secure else "FALSE"
+            expiry = int(cookie.expires) if cookie.expires else 0
+            f.write(f"{domain}\tTRUE\t{cookie.path}\t{secure}\t{expiry}\t{cookie.name}\t{cookie.value}\n")
+
+
+def download_audio(url: str, output_dir: str, cookies_file: str) -> tuple[str, str, dict]:
     """Download audio-only from a YouTube URL using yt-dlp.
 
     Returns (video_title, path_to_wav_file, info_dict).
     """
     ydl_opts = {
         "format": "bestaudio/best",
-        # Use video ID as filename to avoid special character issues
         "outtmpl": os.path.join(output_dir, "%(id)s.%(ext)s"),
         "postprocessors": [
             {
@@ -31,12 +47,8 @@ def download_audio(url: str, output_dir: str, cookies_file: str | None = None) -
         ],
         "quiet": True,
         "no_warnings": True,
-        # Try multiple player clients to bypass bot detection on cloud environments
-        "extractor_args": {"youtube": {"player_client": ["ios", "android", "web"]}},
+        "cookiefile": cookies_file,
     }
-
-    if cookies_file:
-        ydl_opts["cookiefile"] = cookies_file
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -46,13 +58,14 @@ def download_audio(url: str, output_dir: str, cookies_file: str | None = None) -
         return title, audio_path, info
 
 
-def get_channel_stats(channel_url: str) -> dict:
+def get_channel_stats(channel_url: str, cookies_file: str) -> dict:
     """Fetch channel subscriber count, description, and average views over recent videos."""
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": True,
         "playlistend": 30,
+        "cookiefile": cookies_file,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(channel_url + "/videos", download=False)
@@ -71,10 +84,7 @@ def get_channel_stats(channel_url: str) -> dict:
 
 
 def transcribe(audio_path: str, model: WhisperModel) -> str:
-    """Transcribe an audio file using faster-whisper.
-
-    Returns the full transcript as a plain string.
-    """
+    """Transcribe an audio file using faster-whisper."""
     segments, _ = model.transcribe(audio_path, beam_size=5)
     return " ".join(seg.text.strip() for seg in segments)
 
@@ -92,21 +102,25 @@ def process_urls(urls: list[str], output_dir: str, model_size: str) -> None:
     print("Model ready.\n")
 
     os.makedirs(output_dir, exist_ok=True)
-
     success, failed = 0, 0
 
     with tempfile.TemporaryDirectory() as tmp_dir:
+        # Generate fresh anonymous cookies once per run
+        cookies_file = os.path.join(tmp_dir, "yt_cookies.txt")
+        print("Generating YouTube session cookies...")
+        generate_youtube_cookies(cookies_file)
+
         for i, url in enumerate(urls, 1):
             print(f"[{i}/{len(urls)}] {url}")
 
             try:
                 print("  Downloading audio...")
-                title, audio_path, info = download_audio(url, tmp_dir)
+                title, audio_path, info = download_audio(url, tmp_dir, cookies_file)
                 print(f"  Title: {title}")
 
                 print("  Fetching channel stats...")
                 channel_url = info.get("channel_url", "")
-                channel_stats = get_channel_stats(channel_url) if channel_url else {}
+                channel_stats = get_channel_stats(channel_url, cookies_file) if channel_url else {}
 
                 print("  Transcribing...")
                 transcript = transcribe(audio_path, model)
@@ -118,7 +132,6 @@ def process_urls(urls: list[str], output_dir: str, model_size: str) -> None:
                     {"average_views": channel_stats.get("average_views")},
                 ]
 
-                # Write transcript file
                 out_name = sanitize_filename(title) + ".txt"
                 out_path = os.path.join(output_dir, out_name)
                 with open(out_path, "w", encoding="utf-8") as f:
@@ -138,7 +151,6 @@ def process_urls(urls: list[str], output_dir: str, model_size: str) -> None:
                 failed += 1
 
             finally:
-                # Clean up the downloaded audio file
                 if "audio_path" in dir() and os.path.exists(audio_path):
                     os.remove(audio_path)
 
@@ -163,48 +175,34 @@ def collect_urls(inputs: list[str]) -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Download YouTube videos and generate AI captions via faster-whisper.",
+        description="Download YouTube videos and transcribe via faster-whisper (no login required).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   python scraper.py https://www.youtube.com/watch?v=dQw4w9WgXcQ
   python scraper.py URL1 URL2 URL3 -o my_transcripts
   python scraper.py urls.txt -m small
-  python scraper.py urls.txt URL1 -o output -m medium
 
-Model sizes (accuracy vs. speed trade-off):
-  tiny   ~39M  params  fastest, least accurate
-  base   ~74M  params  good balance (default)
+Model sizes:
+  tiny   ~39M  params  fastest
+  base   ~74M  params  default
   small  ~244M params  better accuracy
-  medium ~769M params  high accuracy, slow
-  large-v3 ~1.5B params  best accuracy, very slow
+  medium ~769M params  high accuracy
+  large-v3 ~1.5B params  best accuracy
         """,
     )
+    parser.add_argument("input", nargs="+", help="YouTube URL(s) and/or .txt files")
+    parser.add_argument("-o", "--output", default="output", metavar="DIR")
     parser.add_argument(
-        "input",
-        nargs="+",
-        help="YouTube URL(s) and/or .txt file(s) with one URL per line",
-    )
-    parser.add_argument(
-        "-o",
-        "--output",
-        default="output",
-        metavar="DIR",
-        help="Directory to save transcript .txt files (default: output)",
-    )
-    parser.add_argument(
-        "-m",
-        "--model",
-        default="base",
+        "-m", "--model", default="base",
         choices=["tiny", "base", "small", "medium", "large-v2", "large-v3"],
-        help="Whisper model size (default: base)",
     )
 
     args = parser.parse_args()
     urls = collect_urls(args.input)
 
     if not urls:
-        print("No URLs found. Provide YouTube URLs or a .txt file with one URL per line.")
+        print("No URLs found.")
         sys.exit(1)
 
     print(f"Found {len(urls)} URL(s) to process.")

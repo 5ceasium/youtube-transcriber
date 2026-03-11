@@ -1,4 +1,5 @@
 yt-dlp
 faster-whisper
+curl_cffi
 fastapi
 uvicorn[standard]

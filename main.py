@@ -3,17 +3,16 @@
 FastAPI wrapper for the YouTube transcriber scraper.
 """
 
+import os
 import tempfile
 import asyncio
-import base64
-import os
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from faster_whisper import WhisperModel
 
-from scraper import download_audio, transcribe, get_channel_stats
+from scraper import generate_youtube_cookies, download_audio, transcribe, get_channel_stats
 
 app = FastAPI(title="YouTube Transcriber")
 executor = ThreadPoolExecutor(max_workers=2)
@@ -28,7 +27,6 @@ async def startup():
 
 class TranscribeRequest(BaseModel):
     url: str
-    cookies: str | None = None  # Base64-encoded Netscape-format cookie file contents
 
 
 @app.get("/")
@@ -40,24 +38,21 @@ async def health():
 async def transcribe_video(req: TranscribeRequest):
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(executor, _process, req.url, req.cookies)
+        result = await loop.run_in_executor(executor, _process, req.url)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     return result
 
 
-def _process(url: str, cookies_b64: str | None = None) -> dict:
+def _process(url: str) -> dict:
     with tempfile.TemporaryDirectory() as tmp_dir:
-        cookies_file = None
-        if cookies_b64:
-            cookies_file = os.path.join(tmp_dir, "cookies.txt")
-            with open(cookies_file, "w") as f:
-                f.write(base64.b64decode(cookies_b64).decode("utf-8"))
+        cookies_file = os.path.join(tmp_dir, "yt_cookies.txt")
+        generate_youtube_cookies(cookies_file)
 
         title, audio_path, info = download_audio(url, tmp_dir, cookies_file)
 
         channel_url = info.get("channel_url", "")
-        channel_stats = get_channel_stats(channel_url) if channel_url else {}
+        channel_stats = get_channel_stats(channel_url, cookies_file) if channel_url else {}
 
         transcript = transcribe(audio_path, model)
 
